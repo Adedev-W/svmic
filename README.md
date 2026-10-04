@@ -36,8 +36,7 @@ SVMIC turns that raw input into a consistent on-air workflow:
 SVMIC is an interpretation and delivery tool. It does **not** answer
 participant questions or invent factual claims.
 
-## Product experience
-
+## GUI Preview
 The native Windows app is designed for fast operation during a live session:
 
 ![SVMIC GUI preview](./image.png)
