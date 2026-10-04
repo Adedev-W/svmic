@@ -8,35 +8,81 @@
 
 > **Turn messy audience questions into clear, broadcast-ready MC narration.**
 
-SVMIC is a Windows GUI tool for live Q&A workflows. It takes a participant's
-written submission, identifies the questions inside it, rewrites them into
-natural spoken language, and can read the result aloud through a virtual
-microphone.
+SVMIC helps event operators transform unstructured participant submissions into
+questions an MC can read with confidence. It identifies the real questions,
+preserves the participant's meaning, rewrites each question for natural spoken
+delivery, and can send the finished narration directly to a virtual microphone.
 
-The goal is simple: an MC or event operator should be able to move from
-**unstructured audience input** to **clear, consistent on-air narration**
-without manually editing every question or recording audio files in advance.
+Built for live Q&A, SVMIC keeps the operator in control: review structured
+output in the app, choose the desired delivery mode, and process each
+submission without switching between tools.
 
-## Why SVMIC?
+## The problem SVMIC solves
 
-Audience questions are rarely ready to be read aloud. A single submission may
-contain background context, multiple questions, informal wording, or a mix of
-languages. Reading that text verbatim can make a live session difficult to
-follow and can make the quality of the event depend on how quickly an operator
-can edit under pressure.
+Audience submissions rarely arrive ready for the stage. One message may contain
+context, multiple questions, informal wording, or several languages. Reading it
+verbatim can slow down a live session and make the quality of delivery depend
+on manual editing under pressure.
 
-SVMIC addresses that workflow by:
+SVMIC turns that raw input into a consistent on-air workflow:
 
-- separating multiple questions from one submission;
-- preserving the original wording as an exact source excerpt;
-- rewriting each question for clear spoken delivery;
-- summarizing what the participant is trying to find out, without answering it;
-- producing narration in the participant's dominant language, or a requested
-  language;
-- streaming generated speech directly to a virtual audio cable.
+- separate multiple questions from a single participant submission;
+- preserve the original wording as a source excerpt;
+- rewrite questions into clear, MC-friendly narration;
+- summarize the participant's intent without answering the question;
+- generate narration in the detected language or a requested language;
+- stream the narration to a virtual audio cable when it is ready.
 
 SVMIC is an interpretation and delivery tool. It does **not** answer
 participant questions or invent factual claims.
+
+## Product experience
+
+The native Windows app is designed for fast operation during a live session:
+
+![SVMIC GUI preview](./image.png)
+
+1. Paste or type a participant submission into the multiline input box.
+2. Optionally specify the output language.
+3. Choose how the result should be delivered.
+4. Press **Process**.
+5. Review the structured result or let SVMIC narrate it through the virtual
+   microphone.
+
+Both the input and output areas support scrolling, making long submissions and
+structured responses practical to review. Network and audio work run in the
+background so the interface remains responsive while a request is processing.
+Status messages and failures are shown directly in the app.
+
+## Modes
+
+### Agent (JSON)
+
+Use **Agent (JSON)** when you want to inspect the interpretation before it goes
+on air. SVMIC displays validated structured output containing:
+
+- detected source and output languages;
+- a concise context summary;
+- the number and order of detected questions;
+- the original source excerpt for each question;
+- an MC-ready `spoken_question`;
+- a `simplified_intent` describing what the participant wants to learn;
+- ordered text-to-speech segments.
+
+This mode is useful for moderation, review, production checks, and workflows
+that need a predictable structured result.
+
+### Speak (CABLE Input)
+
+Use **Speak (CABLE Input)** when the result is ready for live delivery. SVMIC
+sends each narration segment to OpenAI text-to-speech, decodes the returned PCM
+stream, and plays it through the Windows device exposed as `CABLE Input`.
+
+Select **CABLE Output (VB-Audio Virtual Cable)** as the input device in OBS,
+your mixer, meeting application, or other destination that should receive the
+generated voice.
+
+Listeners should be told that the voice is AI-generated and not a human voice.
 
 ## How it works
 
@@ -45,83 +91,60 @@ flowchart LR
     A[Participant submission] --> B[GUI input]
     B --> C[DeepSeek MC agent]
     C --> D{Validated structured output}
-    D -->|needs_clarification| E[Return clarification reason]
-    D -->|ready| F[Questions and narration segments]
-    F -->|Agent mode| G[Show JSON]
+    D -->|Needs clarification| E[Show clarification reason]
+    D -->|Ready| F[Questions and narration segments]
+    F -->|Agent mode| G[Show scrollable JSON]
     F -->|Speak mode| H[OpenAI text-to-speech]
     H --> I[Stream PCM audio]
     I --> J[Decode and buffer samples]
-    J --> K[Resample for the output device]
+    J --> K[Resample for output device]
     K --> L[CPAL stereo playback]
     L --> M[CABLE Input]
     M --> N[OBS, mixer, meeting app, or PA system]
 ```
 
-### The App flow
+The DeepSeek agent treats the submission as participant data, extracts each
+distinct question, and prepares an MC-friendly version. Before the result is
+used, SVMIC validates question numbering, source excerpts, narration coverage,
+and segment limits.
 
-1. The operator supplies a question in the multiline GUI input box.
-2. The DeepSeek agent treats the submission as quoted participant data. It
-   extracts each distinct question and prepares an MC-friendly version.
-3. SVMIC validates the response before using it. Question numbers, source
-   excerpts, narration segments, and character limits must all be consistent.
-4. With **Agent (JSON)**, the validated result is shown in the scrollable
-   output box for review.
-5. With **Speak (CABLE Input)**, each narration segment is sent to OpenAI TTS
-   as it is needed.
-6. The returned PCM audio is decoded, buffered, resampled when necessary, and
-   played to `CABLE Input` through CPAL.
-7. Any application listening to the other side of the VB-Audio Virtual Cable
-   can use the generated voice as an audio input.
+For speech delivery, the OpenAI TTS stream is consumed as 16-bit PCM audio at a
+24 kHz source rate. SVMIC adapts it to a supported stereo configuration on the
+selected virtual cable, starts playback after a short prebuffer, and inserts
+silence if the stream temporarily underflows.
 
-## Modes
+## Output guarantees
 
-SVMIC has two GUI modes:
+When meaningful questions are found, the result has `status: "ready"` and
+contains the validated questions and narration segments.
 
-| Mode | Use it when |
-| --- | --- |
-| **Agent (JSON)** | You need structured output for moderation, review, automation, or debugging. |
-| **Speak (CABLE Input)** | You want the narration to be generated and sent to the virtual microphone. |
+When the submission does not contain a meaningful question, the result has
+`status: "needs_clarification"` and a `clarification_reason`. Speak mode stops
+before calling TTS, so unclear input is never turned into accidental narration.
 
-The optional output-language field overrides the language used for the
-generated narrative. Both input and output boxes support scrolling.
+Before output is accepted, SVMIC verifies that:
 
-## Technology
-
-SVMIC is a small Rust application with a focused streaming pipeline:
-
-- **Rust 2024** provides the native GUI and audio runtime.
-- **eframe/egui** provide the native application window and text controls.
-- **Tokio** handles asynchronous API calls, timeouts, retries, and streaming.
-- **DeepSeek Responses API** with `deepseek-flash` interprets participant
-  submissions and creates validated MC narration data.
-- **OpenAI Audio Speech API** with `gpt-4o-mini-tts` and the `marin` voice
-  generates the spoken output.
-- **Hyper and hyper-rustls** provide HTTPS clients using native TLS roots.
-- **Serde and serde_json** model and validate the structured agent response.
-- **CPAL** connects the application to the Windows audio output device.
-- **ringbuf** provides the producer-consumer audio buffer used during playback.
-- **VB-Audio Virtual Cable** exposes the generated narration to other audio
-  applications.
-
-The TTS stream is consumed as 16-bit PCM audio at a 24 kHz source rate.
-SVMIC adapts that stream to a supported stereo configuration on the selected
-virtual cable, starts playback after a short prebuffer, and inserts silence if
-the stream temporarily underflows.
+- question numbers are contiguous and match `question_count`;
+- every source excerpt occurs in the participant submission;
+- every question is covered by exactly one TTS segment;
+- TTS segments are non-empty and no longer than 3,500 Unicode characters;
+- clarification output contains no questions or TTS segments.
 
 ## Requirements
 
 - Windows
 - Rust with support for **edition 2024**
-- [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) installed
-- A `CABLE Input` playback device visible to Windows
+- [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) for Speak mode
+- A playback device named `CABLE Input` or
+  `CABLE Input (VB-Audio Virtual Cable)`
 - A DeepSeek API key
-- An OpenAI API key for **Speak (CABLE Input)** mode
-- An application such as OBS, a mixer, or a meeting tool that can select the
-  virtual cable as an audio input
+- An OpenAI API key for Speak mode
+- OBS, a mixer, a meeting application, or another destination that can select
+  the virtual cable as an audio input
 
 ## Setup
 
-Clone the repository and build the release binary:
+Clone the repository and build the application:
 
 ```powershell
 git clone https://github.com/Adedev-W/svmic.git
@@ -136,85 +159,60 @@ DEEPSEEK_API_KEY=your_deepseek_api_key
 OPENAI_API_KEY=your_openai_api_key
 ```
 
-SVMIC loads this file automatically. Keep it out of version control and never
-share the API keys.
+SVMIC loads these values automatically. Keep the file out of version control
+and never share the API keys.
 
-Before using **Speak (CABLE Input)** mode, verify that Windows exposes the virtual cable as
+Before using Speak mode, confirm that Windows exposes the virtual cable as
 `CABLE Input` or `CABLE Input (VB-Audio Virtual Cable)`. The application sends
-audio to `CABLE Input`; an application receiving that signal normally selects
-the corresponding `CABLE Output` device.
+audio to `CABLE Input`; receiving applications normally select the matching
+`CABLE Output` device.
 
 ## Usage
 
-Build and start the GUI:
+Start the native GUI:
 
 ```powershell
 cargo run --release
 ```
 
-Paste a participant submission into the multiline **Question / participant
-input** box, optionally enter an output language, and choose a mode. Press
-**Process** to start. The window remains responsive while network and audio
-work run in the background, and errors are shown explicitly in the status and
-scrollable output areas.
+In the SVMIC window:
 
-After processing starts, select **CABLE Output (VB-Audio Virtual Cable)** as
-the input device in OBS, your mixer, meeting application, or other destination.
+1. Enter the participant's text in **Question / participant input**.
+2. Enter an output language if needed, such as `Bahasa Indonesia`.
+3. Select **Agent (JSON)** or **Speak (CABLE Input)**.
+4. Press **Process**.
+5. Follow the status indicator and review the scrollable output area.
 
-The application also prints a disclosure reminder before synthesis: listeners
-should be told that the voice is AI-generated and not a human voice.
-
-## Output behavior
-
-When the agent can identify one or more meaningful questions, it returns
-`status: "ready"` with:
-
-- the detected source and output languages;
-- a context summary;
-- an ordered list of questions;
-- the original `source_text` for each question;
-- a `spoken_question` suitable for an MC;
-- a `simplified_intent` describing what the participant wants to learn;
-- one or more ordered TTS segments.
-
-When the submission does not contain a meaningful question, it returns
-`status: "needs_clarification"` and a `clarification_reason`. The **Speak
-(CABLE Input)** mode stops before calling TTS, so unclear input is never turned
-into accidental narration.
-
-The agent enforces the following guarantees before output is accepted:
-
-- question numbers are contiguous and match `question_count`;
-- each source excerpt occurs in the participant submission;
-- every question is covered by exactly one TTS segment;
-- TTS segments are non-empty and no longer than 3,500 Unicode characters;
-- clarification output contains no questions or TTS segments.
+The language field accepts letters, spaces, and hyphens, with a maximum of 64
+characters. Leave it empty to let the agent determine the output language from
+the submission.
 
 ## Reliability and failure handling
 
-Network requests have bounded timeouts and a single retry for transient
-failures such as rate limits, server errors, and connection timeouts. Errors are
-reported explicitly rather than converted into an apparently successful
-result.
+SVMIC uses bounded timeouts and a retry for transient network failures such as
+rate limits, server errors, and connection timeouts. Errors are reported
+explicitly rather than converted into an apparently successful result.
 
-Audio playback uses a bounded ring buffer and waits for a short prebuffer
-before starting. If the device cannot keep up, SVMIC inserts silence and
-reports the number of underflow frames. It also verifies that the selected
-virtual cable supports a stereo 16-bit output configuration.
+Audio playback uses a bounded ring buffer and waits for a short prebuffer before
+starting. If the device cannot keep up, SVMIC inserts silence and reports the
+number of underflow frames. It also verifies that the selected virtual cable
+supports a stereo 16-bit output configuration.
 
-## Development
+## Technology
 
-Run the Rust test suite:
+SVMIC combines a focused native UI with a streaming interpretation and audio
+pipeline:
 
-```powershell
-cargo test
-```
-
-Build the optimized binary:
-
-```powershell
-cargo build --release
-```
+- **Rust 2024** for the application and runtime;
+- **eframe/egui** for the native window and scrollable text controls;
+- **Tokio** for asynchronous API calls, timeouts, retries, and background work;
+- **DeepSeek Responses API** with `deepseek-flash` for question interpretation;
+- **OpenAI Audio Speech API** with `gpt-4o-mini-tts` and the `marin` voice;
+- **Hyper and hyper-rustls** for HTTPS clients with native TLS roots;
+- **Serde and serde_json** for structured output and validation;
+- **CPAL** for Windows audio device playback;
+- **ringbuf** for the producer-consumer audio buffer;
+- **VB-Audio Virtual Cable** for routing generated narration to other apps.
 
 ## License
 
