@@ -8,10 +8,10 @@
 
 > **Turn messy audience questions into clear, broadcast-ready MC narration.**
 
-SVMIC is a Windows command-line tool for live Q&A workflows. It takes a
-participant's written submission, identifies the questions inside it, rewrites
-them into natural spoken language, and can read the result aloud through a
-virtual microphone.
+SVMIC is a Windows GUI tool for live Q&A workflows. It takes a participant's
+written submission, identifies the questions inside it, rewrites them into
+natural spoken language, and can read the result aloud through a virtual
+microphone.
 
 The goal is simple: an MC or event operator should be able to move from
 **unstructured audience input** to **clear, consistent on-air narration**
@@ -42,13 +42,13 @@ participant questions or invent factual claims.
 
 ```mermaid
 flowchart LR
-    A[Participant submission] --> B[CLI input]
+    A[Participant submission] --> B[GUI input]
     B --> C[DeepSeek MC agent]
     C --> D{Validated structured output}
     D -->|needs_clarification| E[Return clarification reason]
     D -->|ready| F[Questions and narration segments]
-    F -->|agent command| G[Print JSON]
-    F -->|speak command| H[OpenAI text-to-speech]
+    F -->|Agent mode| G[Show JSON]
+    F -->|Speak mode| H[OpenAI text-to-speech]
     H --> I[Stream PCM audio]
     I --> J[Decode and buffer samples]
     J --> K[Resample for the output device]
@@ -57,40 +57,40 @@ flowchart LR
     M --> N[OBS, mixer, meeting app, or PA system]
 ```
 
-### The product flow
+### The App flow
 
-1. The operator supplies a question as a command-line argument or through
-   standard input.
+1. The operator supplies a question in the multiline GUI input box.
 2. The DeepSeek agent treats the submission as quoted participant data. It
    extracts each distinct question and prepares an MC-friendly version.
 3. SVMIC validates the response before using it. Question numbers, source
    excerpts, narration segments, and character limits must all be consistent.
-4. With `agent`, the validated result is returned as JSON for review or for
-   another system to consume.
-5. With `speak`, each narration segment is sent to OpenAI TTS as it is needed.
+4. With **Agent (JSON)**, the validated result is shown in the scrollable
+   output box for review.
+5. With **Speak (CABLE Input)**, each narration segment is sent to OpenAI TTS
+   as it is needed.
 6. The returned PCM audio is decoded, buffered, resampled when necessary, and
    played to `CABLE Input` through CPAL.
 7. Any application listening to the other side of the VB-Audio Virtual Cable
    can use the generated voice as an audio input.
 
-## Commands
+## Modes
 
-SVMIC has two commands:
+SVMIC has two GUI modes:
 
-| Command | Use it when |
+| Mode | Use it when |
 | --- | --- |
-| `agent` | You need structured output for moderation, review, automation, or debugging. |
-| `speak` | You want the narration to be generated and sent to the virtual microphone. |
+| **Agent (JSON)** | You need structured output for moderation, review, automation, or debugging. |
+| **Speak (CABLE Input)** | You want the narration to be generated and sent to the virtual microphone. |
 
-Both commands accept a direct text argument or `-` to read the submission from
-stdin. The optional `--language` flag overrides the language used for the
-generated narrative.
+The optional output-language field overrides the language used for the
+generated narrative. Both input and output boxes support scrolling.
 
 ## Technology
 
 SVMIC is a small Rust application with a focused streaming pipeline:
 
-- **Rust 2024** provides the native CLI and audio runtime.
+- **Rust 2024** provides the native GUI and audio runtime.
+- **eframe/egui** provide the native application window and text controls.
 - **Tokio** handles asynchronous API calls, timeouts, retries, and streaming.
 - **DeepSeek Responses API** with `deepseek-flash` interprets participant
   submissions and creates validated MC narration data.
@@ -115,7 +115,7 @@ the stream temporarily underflows.
 - [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) installed
 - A `CABLE Input` playback device visible to Windows
 - A DeepSeek API key
-- An OpenAI API key for the `speak` command
+- An OpenAI API key for **Speak (CABLE Input)** mode
 - An application such as OBS, a mixer, or a meeting tool that can select the
   virtual cable as an audio input
 
@@ -139,52 +139,26 @@ OPENAI_API_KEY=your_openai_api_key
 SVMIC loads this file automatically. Keep it out of version control and never
 share the API keys.
 
-Before using `speak`, verify that Windows exposes the virtual cable as
+Before using **Speak (CABLE Input)** mode, verify that Windows exposes the virtual cable as
 `CABLE Input` or `CABLE Input (VB-Audio Virtual Cable)`. The application sends
 audio to `CABLE Input`; an application receiving that signal normally selects
 the corresponding `CABLE Output` device.
 
 ## Usage
 
-### Inspect the structured interpretation
-
-Pass a submission as one quoted argument:
+Build and start the GUI:
 
 ```powershell
-.\target\release\svmic.exe agent "What is the product strategy, and how will success be measured?"
+cargo run --release
 ```
 
-The command writes the JSON result to stdout. Operational logs are written to
-stderr, so the JSON can be piped into another tool:
+Paste a participant submission into the multiline **Question / participant
+input** box, optionally enter an output language, and choose a mode. Press
+**Process** to start. The window remains responsive while network and audio
+work run in the background, and errors are shown explicitly in the status and
+scrollable output areas.
 
-```powershell
-.\target\release\svmic.exe agent "How does the roadmap support our customers?" |
-  Out-File .\agent-output.json
-```
-
-Use stdin for a longer submission:
-
-```powershell
-Get-Content .\question.txt -Raw |
-  .\target\release\svmic.exe agent -
-```
-
-Request a specific output language:
-
-```powershell
-.\target\release\svmic.exe agent `
-  --language "English" `
-  "Can you explain the launch plan?"
-```
-
-### Send narration to the virtual microphone
-
-```powershell
-.\target\release\svmic.exe speak `
-  "What is the main product goal for the next quarter?"
-```
-
-After the command starts, select **CABLE Output (VB-Audio Virtual Cable)** as
+After processing starts, select **CABLE Output (VB-Audio Virtual Cable)** as
 the input device in OBS, your mixer, meeting application, or other destination.
 
 The application also prints a disclosure reminder before synthesis: listeners
@@ -204,9 +178,9 @@ When the agent can identify one or more meaningful questions, it returns
 - one or more ordered TTS segments.
 
 When the submission does not contain a meaningful question, it returns
-`status: "needs_clarification"` and a `clarification_reason`. The `speak`
-command stops before calling TTS, so unclear input is never turned into
-accidental narration.
+`status: "needs_clarification"` and a `clarification_reason`. The **Speak
+(CABLE Input)** mode stops before calling TTS, so unclear input is never turned
+into accidental narration.
 
 The agent enforces the following guarantees before output is accepted:
 
@@ -241,10 +215,6 @@ Build the optimized binary:
 ```powershell
 cargo build --release
 ```
-
-The legacy WAV playback implementation in `src/audio_legacy.rs` is retained as
-historical code; the active application path is the streaming pipeline used by
-`src/audio.rs`, `src/tts.rs`, and `src/agent.rs`.
 
 ## License
 

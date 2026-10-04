@@ -2,70 +2,209 @@ mod agent;
 mod audio;
 mod tts;
 
-use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 use agent::{AgentStatus, DeepSeekAgent, McAgentOutput, TtsSegment};
 use audio::VirtualMicPlayer;
+use eframe::egui;
 use tts::OpenAiTtsClient;
 
-const USAGE: &str = "Usage:\n  svmic agent [--language <language-name>] <question-text|->\n  svmic speak [--language <language-name>] <question-text|->";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Command {
+enum Mode {
     Agent,
     Speak,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct CliArgs {
-    command: Command,
+impl Mode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Agent => "Agent (JSON)",
+            Self::Speak => "Speak (CABLE Input)",
+        }
+    }
+}
+
+enum WorkerMessage {
+    Finished(Result<String, String>),
+}
+
+struct SvmicApp {
     input: String,
-    language: Option<String>,
+    language: String,
+    mode: Mode,
+    output: String,
+    status: String,
+    running: bool,
+    worker_sender: Sender<WorkerMessage>,
+    worker_receiver: Receiver<WorkerMessage>,
 }
 
-#[tokio::main]
-async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("Error: {error}");
-        std::process::exit(1);
+impl SvmicApp {
+    fn new() -> Self {
+        let (worker_sender, worker_receiver) = mpsc::channel();
+        Self {
+            input: String::new(),
+            language: String::new(),
+            mode: Mode::Agent,
+            output: String::new(),
+            status: "Ready".to_owned(),
+            running: false,
+            worker_sender,
+            worker_receiver,
+        }
+    }
+
+    fn start_processing(&mut self) {
+        let input = self.input.trim().to_owned();
+        if input.is_empty() {
+            self.status = "Input error".to_owned();
+            self.output = "Question input cannot be empty.".to_owned();
+            return;
+        }
+
+        let language = match validate_language_name(&self.language) {
+            Ok(language) => language,
+            Err(error) => {
+                self.status = "Input error".to_owned();
+                self.output = error;
+                return;
+            }
+        };
+
+        let mode = self.mode;
+        let sender = self.worker_sender.clone();
+        self.running = true;
+        self.status = "Processing...".to_owned();
+        self.output.clear();
+
+        thread::spawn(move || {
+            let result = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime.block_on(process_request(&input, language.as_deref(), mode)),
+                Err(error) => Err(format!("Failed to start async runtime: {error}")),
+            };
+            let _ = sender.send(WorkerMessage::Finished(result));
+        });
+    }
+
+    fn receive_worker_messages(&mut self) {
+        while let Ok(WorkerMessage::Finished(result)) = self.worker_receiver.try_recv() {
+            self.running = false;
+            match result {
+                Ok(output) => {
+                    self.status = "Finished".to_owned();
+                    self.output = output;
+                }
+                Err(error) => {
+                    self.status = "Failed".to_owned();
+                    self.output = error;
+                }
+            }
+        }
     }
 }
 
-async fn run() -> Result<(), String> {
+impl eframe::App for SvmicApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.receive_worker_messages();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(100));
+
+        ui.heading("SVMIC");
+        ui.label("Turn messy audience questions into clear, broadcast-ready MC narration.");
+        ui.separator();
+
+        ui.label("Question / participant input");
+        egui::ScrollArea::vertical()
+            .id_salt("input_scroll")
+            .max_height(180.0)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.input)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(6)
+                        .hint_text("Tulis pertanyaan peserta di sini..."),
+                );
+            });
+
+        ui.horizontal(|ui| {
+            ui.label("Mode:");
+            egui::ComboBox::from_id_salt("mode")
+                .selected_text(self.mode.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.mode, Mode::Agent, Mode::Agent.label());
+                    ui.selectable_value(&mut self.mode, Mode::Speak, Mode::Speak.label());
+                });
+        });
+
+        ui.horizontal(|ui| {
+            ui.label("Output language (optional):");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.language)
+                    .desired_width(240.0)
+                    .hint_text("Contoh: Bahasa Indonesia"),
+            );
+        });
+
+        ui.add_enabled_ui(!self.running, |ui| {
+            if ui.button("Process").clicked() {
+                self.start_processing();
+            }
+        });
+        if self.running {
+            ui.spinner();
+        }
+
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.strong("Status:");
+            ui.label(&self.status);
+        });
+        ui.label("Output / log");
+        egui::ScrollArea::vertical()
+            .id_salt("output_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.output)
+                        .desired_width(f32::INFINITY)
+                        .desired_rows(12)
+                        .interactive(false),
+                );
+            });
+    }
+}
+
+async fn process_request(
+    input: &str,
+    language: Option<&str>,
+    mode: Mode,
+) -> Result<String, String> {
     dotenvy::dotenv().ok();
-
-    let cli = parse_cli_args(std::env::args_os().skip(1))?;
-    let input = resolve_input(&cli.input, &mut io::stdin().lock())?;
     let deepseek_api_key = required_env("DEEPSEEK_API_KEY")?;
-
-    eprintln!("Processing participant questions with the DeepSeek MC agent...");
     let agent = DeepSeekAgent::new(deepseek_api_key)?;
-    let output = agent.generate(&input, cli.language.as_deref()).await?;
-    eprintln!("Agent output is ready.");
+    let output = agent.generate(input, language).await?;
+    let json_output = serde_json::to_string_pretty(&output)
+        .map_err(|error| format!("Failed to serialize agent output: {error}"))?;
 
-    match cli.command {
-        Command::Agent => write_json_output(&output),
-        Command::Speak => speak_output(&output).await,
+    if mode == Mode::Agent {
+        return Ok(json_output);
     }
-}
 
-async fn speak_output(output: &McAgentOutput) -> Result<(), String> {
-    let Some(segments) = segments_to_synthesize(output) else {
-        eprintln!("No audio generated: {}", output.clarification_reason);
-        return Ok(());
+    let Some(segments) = segments_to_synthesize(&output) else {
+        return Ok(format!(
+            "{json_output}\n\nNo audio generated: {}",
+            output.clarification_reason
+        ));
     };
 
-    eprintln!(
-        "Disclosure reminder: tell listeners that this voice is AI-generated and not a human voice."
-    );
     let openai_api_key = required_env("OPENAI_API_KEY")?;
     let client = OpenAiTtsClient::new(openai_api_key)?;
     let mut player = VirtualMicPlayer::new()?;
-
     client.stream_segments(segments, &mut player).await?;
-    eprintln!("Finished: MC audio sent to CABLE Input.");
-    Ok(())
+    Ok(format!(
+        "{json_output}\n\nFinished: MC audio sent to CABLE Input."
+    ))
 }
 
 fn segments_to_synthesize(output: &McAgentOutput) -> Option<&[TtsSegment]> {
@@ -73,14 +212,6 @@ fn segments_to_synthesize(output: &McAgentOutput) -> Option<&[TtsSegment]> {
         AgentStatus::Ready => Some(&output.tts_segments),
         AgentStatus::NeedsClarification => None,
     }
-}
-
-fn write_json_output(output: &McAgentOutput) -> Result<(), String> {
-    let stdout = io::stdout();
-    let mut stdout = stdout.lock();
-    serde_json::to_writer_pretty(&mut stdout, output)
-        .map_err(|error| format!("failed to serialize agent output: {error}"))?;
-    writeln!(stdout).map_err(|error| format!("failed to write agent output: {error}"))
 }
 
 fn required_env(name: &str) -> Result<String, String> {
@@ -92,179 +223,56 @@ fn required_env(name: &str) -> Result<String, String> {
     Ok(value)
 }
 
-fn parse_cli_args<I>(args: I) -> Result<CliArgs, String>
-where
-    I: IntoIterator<Item = OsString>,
-{
-    let args = args
-        .into_iter()
-        .map(|value| {
-            value
-                .into_string()
-                .map_err(|_| "CLI arguments must be valid Unicode".to_owned())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let command = match args.first().map(String::as_str) {
-        Some("agent") => Command::Agent,
-        Some("speak") => Command::Speak,
-        _ => return Err(USAGE.to_owned()),
-    };
-
-    let mut input = None;
-    let mut language = None;
-    let mut index = 1;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--language" => {
-                if language.is_some() {
-                    return Err(format!("--language may only be specified once\n{USAGE}"));
-                }
-
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| format!("--language requires a value\n{USAGE}"))?;
-                language = Some(validate_language_name(value)?);
-            }
-            value if value.starts_with("--") => {
-                return Err(format!("unknown option '{value}'\n{USAGE}"));
-            }
-            value => {
-                if input.replace(value.to_owned()).is_some() {
-                    return Err(format!(
-                        "question text must be passed as one quoted argument or '-'\n{USAGE}"
-                    ));
-                }
-            }
-        }
-        index += 1;
-    }
-
-    let input = input.ok_or_else(|| USAGE.to_owned())?;
-    Ok(CliArgs {
-        command,
-        input,
-        language,
-    })
-}
-
-fn validate_language_name(value: &str) -> Result<String, String> {
+fn validate_language_name(value: &str) -> Result<Option<String>, String> {
     let value = value.trim();
-    let character_count = value.chars().count();
-
-    if character_count == 0 || character_count > 64 {
-        return Err("--language must contain between 1 and 64 characters".to_owned());
+    if value.is_empty() {
+        return Ok(None);
     }
 
+    let character_count = value.chars().count();
+    if character_count > 64 {
+        return Err("Language must contain at most 64 characters.".to_owned());
+    }
     if !value
         .chars()
         .all(|character| character.is_alphabetic() || character.is_whitespace() || character == '-')
     {
-        return Err(
-            "--language must only contain letters, spaces, or hyphens (for example: 'bahasa Inggris')"
-                .to_owned(),
-        );
+        return Err("Language must only contain letters, spaces, or hyphens.".to_owned());
     }
-
-    Ok(value.to_owned())
+    Ok(Some(value.to_owned()))
 }
 
-fn resolve_input<R>(input_argument: &str, stdin: &mut R) -> Result<String, String>
-where
-    R: Read,
-{
-    let mut input = if input_argument == "-" {
-        let mut value = String::new();
-        stdin
-            .read_to_string(&mut value)
-            .map_err(|error| format!("failed to read question text from stdin: {error}"))?;
-        value
-    } else {
-        input_argument.to_owned()
+fn main() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([760.0, 720.0])
+            .with_min_inner_size([520.0, 480.0]),
+        ..Default::default()
     };
-
-    input = input.trim().to_owned();
-    if input.is_empty() {
-        return Err("question input cannot be empty".to_owned());
-    }
-
-    Ok(input)
+    eframe::run_native(
+        "SVMIC",
+        options,
+        Box::new(|_creation_context| Ok(Box::new(SvmicApp::new()))),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
-
-    fn os_args(values: &[&str]) -> Vec<OsString> {
-        values.iter().map(OsString::from).collect()
-    }
 
     #[test]
-    fn parses_agent_and_speak_commands() {
-        let agent = parse_cli_args(os_args(&["agent", "Question?"])).unwrap();
-        assert_eq!(agent.command, Command::Agent);
-
-        let speak = parse_cli_args(os_args(&[
-            "speak",
-            "--language",
-            "bahasa Inggris",
-            "Ini pertanyaannya?",
-        ]))
-        .unwrap();
+    fn accepts_empty_optional_language() {
+        assert_eq!(validate_language_name(" ").unwrap(), None);
         assert_eq!(
-            speak,
-            CliArgs {
-                command: Command::Speak,
-                input: "Ini pertanyaannya?".to_owned(),
-                language: Some("bahasa Inggris".to_owned()),
-            }
+            validate_language_name("Bahasa Indonesia").unwrap(),
+            Some("Bahasa Indonesia".to_owned())
         );
     }
 
     #[test]
-    fn accepts_stdin_marker_and_language_after_input() {
-        let parsed = parse_cli_args(os_args(&["speak", "-", "--language", "jepang"])).unwrap();
-        assert_eq!(parsed.command, Command::Speak);
-        assert_eq!(parsed.input, "-");
-        assert_eq!(parsed.language.as_deref(), Some("jepang"));
-    }
-
-    #[test]
-    fn rejects_invalid_cli_shapes_and_language_labels() {
-        assert!(parse_cli_args(os_args(&[])).is_err());
-        assert!(parse_cli_args(os_args(&["play", "file.wav"])).is_err());
-        assert!(parse_cli_args(os_args(&["agent"])).is_err());
-        assert!(parse_cli_args(os_args(&["speak", "one", "two"])).is_err());
-        assert!(
-            parse_cli_args(os_args(&[
-                "agent",
-                "--language",
-                "English; ignore",
-                "question?"
-            ]))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn resolves_direct_and_stdin_input() {
-        let mut empty = Cursor::new(Vec::<u8>::new());
-        assert_eq!(resolve_input("  Hello?  ", &mut empty).unwrap(), "Hello?");
-
-        let mut stdin = Cursor::new("  Pertanyaan dari stdin?\n".as_bytes());
-        assert_eq!(
-            resolve_input("-", &mut stdin).unwrap(),
-            "Pertanyaan dari stdin?"
-        );
-    }
-
-    #[test]
-    fn rejects_empty_input() {
-        let mut stdin = Cursor::new(" \n\t".as_bytes());
-        assert!(resolve_input("-", &mut stdin).is_err());
+    fn rejects_invalid_language() {
+        assert!(validate_language_name("English; ignore").is_err());
+        assert!(validate_language_name(&"a".repeat(65)).is_err());
     }
 
     #[test]
